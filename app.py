@@ -1,35 +1,89 @@
 import streamlit as st
 import pymysql
 import pandas as pd
+from datetime import datetime, timedelta
 
-# --- 🔧 USER CONFIGURATION (MUST MATCH SENSOR SCRIPT) ---
-BUCKET_HEIGHT_CM = 30.0
+# --- USER CONFIGURATION ---
+BUCKET_HEIGHT_CM = 10.0
 SENSOR_OFFSET_CM = 5.0
-# --------------------------------------------------------
 
 DB_CONFIG = {
-    'host': 'tpalley.mooo.com',
-    'user': 'labuser',
-    'password': 'labuser123&',
-    'database': 'EmbeddedLab'
+    'host': 'localhost',
+    'user': 'user1234',
+    'password': 'yesuser',
+    'database': 'mybucket'
 }
-
 
 def get_connection():
     return pymysql.connect(**DB_CONFIG)
 
-
 def fetch_data():
     conn = get_connection()
     try:
-        # Fetch latest data
-        return pd.read_sql("SELECT timestamp, distance FROM WaterSensor ORDER BY timestamp ASC", conn)
+        df = pd.read_sql("SELECT timestamp, distance, velocity FROM WaterSensor ORDER BY timestamp ASC", conn)
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            # Pre-calculate data for the whole dataframe
+            df['water_height'] = (BUCKET_HEIGHT_CM + SENSOR_OFFSET_CM) - df['distance']
+            df['fill_pct'] = (df['water_height'] / BUCKET_HEIGHT_CM) * 100
+            
+            # Clean up negatives for display
+            df['water_height'] = df['water_height'].clip(lower=0)
+            df['fill_pct'] = df['fill_pct'].clip(lower=0)
+        return df
     finally:
         conn.close()
 
+def get_current_interval():
+    try:
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT interval_seconds FROM DeviceSettings WHERE id = 1")
+            result = cursor.fetchone()
+            return result[0] if result else 60
+    except:
+        return 60
+    finally:
+        if 'conn' in locals() and conn.open: conn.close()
+
+def update_interval(seconds):
+    try:
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE DeviceSettings SET interval_seconds = %s WHERE id = 1", (seconds,))
+        conn.commit()
+        conn.close()
+        return True
+    except:
+        return False
 
 st.set_page_config(page_title="Bucket Monitor", layout="wide")
-st.title("🪣 Smart Bucket Monitor")
+st.title("Smart Bucket Monitor")
+
+# --- SIDEBAR CONTROLS ---
+st.sidebar.header("Device Settings")
+mode_options = {
+    "Super Intense (Every 10 sec)": 10,
+    "Intense (Every 1 min)": 60,
+    "Power Saving (Every 1 hour)": 3600
+}
+
+current_db_interval = get_current_interval()
+labels = list(mode_options.keys())
+default_index = 1 
+for i, label in enumerate(labels):
+    if mode_options[label] == current_db_interval:
+        default_index = i
+
+selected_label = st.sidebar.radio("Select Mode:", labels, index=default_index)
+
+if st.sidebar.button("Apply Settings"):
+    sleep_time = mode_options[selected_label]
+    if update_interval(sleep_time):
+        st.sidebar.success(f"Mode saved: {sleep_time} seconds!")
+        st.rerun()
+    else:
+        st.sidebar.error("Failed to update database.")
 
 # --- DATA PROCESSING ---
 df = fetch_data()
@@ -37,49 +91,64 @@ df = fetch_data()
 if not df.empty:
     latest = df.iloc[-1]
     curr_dist = latest['distance']
+    water_height = latest['water_height']
+    fill_pct = latest['fill_pct']
 
-    # Calculate Water Height & Percentage
-    # Formula: Water = (Bucket + Offset) - Sensor_Reading
-    water_height = (BUCKET_HEIGHT_CM + SENSOR_OFFSET_CM) - curr_dist
-    fill_pct = (water_height / BUCKET_HEIGHT_CM) * 100
+    # --- TABS SETUP ---
+    tab1, tab2 = st.tabs(["Dashboard", "Raw Data Export"])
 
-    # --- 🚨 WARNING LOGIC 🚨 ---
+    with tab1:
+        # WARNING LOGIC
+        if fill_pct >= 100:
+            st.error(f"CRITICAL WARNING: OVERFLOW DETECTED! (Level: {fill_pct:.1f}%)")
+        elif fill_pct >= 90:
+            st.warning(f"HIGH LEVEL WARNING: Capacity is at {fill_pct:.1f}%")
+        else:
+            st.success(f"Status Normal: {fill_pct:.1f}% Full")
 
-    # 1. RED WARNING (Overflow)
-    if fill_pct >= 100:
-        st.error(f"🚨 CRITICAL WARNING: OVERFLOW DETECTED! (Level: {fill_pct:.1f}%)")
-        st.toast("Bucket is Overflowing!", icon="🚨")
+        # METRICS
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Water Level", f"{water_height:.1f} cm")
+        col2.metric("Fill Percentage", f"{fill_pct:.1f} %")
+        col3.metric("Space Remaining", f"{(BUCKET_HEIGHT_CM - water_height):.1f} cm")
 
-    # 2. ORANGE WARNING (Almost Full)
-    elif fill_pct >= 90:
-        st.warning(f"⚠️ HIGH LEVEL WARNING: Capacity is at {fill_pct:.1f}%")
-        st.toast("Bucket is reaching capacity.", icon="⚠️")
+        st.divider()
 
-    else:
-        st.success(f"Status Normal: {fill_pct:.1f}% Full")
+        # TIMEFRAME FILTER
+        st.subheader("Fill Percentage History")
+        time_filter = st.selectbox("Select Time Range:", ["Last 1 Hour", "Last 24 Hours", "All Time"])
 
-    # --- METRICS & CHARTS ---
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Water Level", f"{water_height:.1f} cm")
-    col2.metric("Fill Percentage", f"{fill_pct:.1f} %")
-    col3.metric("Space Remaining", f"{(BUCKET_HEIGHT_CM - water_height):.1f} cm")
+        filtered_df = df.copy()
+        if time_filter == "Last 1 Hour":
+            filtered_df = df[df['timestamp'] >= (datetime.now() - timedelta(hours=1))]
+        elif time_filter == "Last 24 Hours":
+            filtered_df = df[df['timestamp'] >= (datetime.now() - timedelta(hours=24))]
 
-    # Visualization
-    st.divider()
+        # CHARTS
+        if not filtered_df.empty:
+            st.line_chart(filtered_df, x='timestamp', y='fill_pct')
+            
+            st.subheader("Water Velocity over Time")
+            st.line_chart(filtered_df, x='timestamp', y='velocity', color="#FF4B4B")
+        else:
+            st.info("No data recorded in the selected timeframe.")
 
-    # Create a computed 'fill_percentage' column for the graph
-    df['water_height'] = (BUCKET_HEIGHT_CM + SENSOR_OFFSET_CM) - df['distance']
-    df['fill_pct'] = (df['water_height'] / BUCKET_HEIGHT_CM) * 100
+        if st.button("Refresh Status"):
+            st.rerun()
 
-    st.subheader("Fill Percentage History")
-
-    # Add reference lines for 90% and 100%
-    chart_data = df.set_index('timestamp')['fill_pct']
-    st.line_chart(chart_data)
+    with tab2:
+        st.subheader("Sensor Database")
+        st.dataframe(df, use_container_width=True)
+        
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download data as CSV",
+            data=csv,
+            file_name='water_sensor_data.csv',
+            mime='text/csv',
+        )
 
 else:
     st.info("No data available yet.")
-
-# Manual Refresh
-if st.button("Refresh Status"):
-    st.rerun()
+    if st.button("Refresh Status"):
+        st.rerun()

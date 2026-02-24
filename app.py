@@ -155,6 +155,8 @@ if not df.empty:
         st.subheader("Sensor Database Export")
         
         export_df = df.copy()
+        
+        # Determine sorting option structure based on selection
         filter_mode = st.radio("Filter data by:", ["Time", "Number of Points"])
         
         if filter_mode == "Time":

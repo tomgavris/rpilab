@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta
 import warnings
 
-# Hide Pandas/Streamlit warnings from terminal
+# Hide Pandas/Streamlit warnings
 warnings.filterwarnings('ignore')
 
 # --- CONFIGURATION ---
@@ -85,7 +85,7 @@ if st.sidebar.button("Apply Settings"):
     sleep_time = mode_options[selected_label]
     if update_interval(sleep_time):
         st.sidebar.success(f"Mode saved: {sleep_time} seconds!")
-        time.sleep(1.5)  # Let the user see the green box before reloading
+        time.sleep(1.5)  
         st.rerun()
     else:
         st.sidebar.error("Failed to update database.")
@@ -102,7 +102,6 @@ if not df.empty:
     tab1, tab2 = st.tabs(["Dashboard", "Raw Data Export"])
 
     with tab1:
-        # WARNING LOGIC
         if fill_pct >= 100:
             st.error(f"CRITICAL WARNING: OVERFLOW DETECTED! (Level: {fill_pct:.1f}%)")
         elif fill_pct >= 90:
@@ -110,7 +109,6 @@ if not df.empty:
         else:
             st.success(f"Status Normal: {fill_pct:.1f}% Full")
 
-        # METRICS
         col1, col2, col3 = st.columns(3)
         col1.metric("Water Level", f"{water_height:.1f} cm")
         col2.metric("Fill Percentage", f"{fill_pct:.1f} %")
@@ -118,14 +116,12 @@ if not df.empty:
 
         st.divider()
 
-        # TIMEFRAME FILTER
         st.subheader("History Logs")
         time_filter = st.selectbox("Select Time Range:", ["Last 1 Hour", "Last 24 Hours", "All Time"])
 
         now = datetime.now()
         filtered_df = df.copy()
         
-        # Calculate exactly where the left side of the graph should start
         if time_filter == "Last 1 Hour":
             domain_start = now - timedelta(hours=1)
             filtered_df = df[df['timestamp'] >= domain_start]
@@ -135,7 +131,6 @@ if not df.empty:
         else:
             domain_start = df['timestamp'].min()
 
-        # CHARTS
         if not filtered_df.empty:
             st.write("**Fill Percentage History**")
             fill_chart = alt.Chart(filtered_df).mark_line().encode(
@@ -157,10 +152,27 @@ if not df.empty:
             st.rerun()
 
     with tab2:
-        st.subheader("Sensor Database")
-        st.dataframe(df)
+        st.subheader("Sensor Database Export")
         
-        csv = df.to_csv(index=False).encode('utf-8')
+        export_df = df.copy()
+        filter_mode = st.radio("Filter data by:", ["Time", "Number of Points"])
+        
+        if filter_mode == "Time":
+            t_sel = st.selectbox("Select Time:", ["1 Hour", "24 Hours", "1 Week", "All Time"])
+            if t_sel == "1 Hour":
+                export_df = df[df['timestamp'] >= (datetime.now() - timedelta(hours=1))]
+            elif t_sel == "24 Hours":
+                export_df = df[df['timestamp'] >= (datetime.now() - timedelta(hours=24))]
+            elif t_sel == "1 Week":
+                export_df = df[df['timestamp'] >= (datetime.now() - timedelta(days=7))]
+        else:
+            p_sel = st.selectbox("Select Points:", ["Last 50", "Last 100", "Last 250", "Last 500"])
+            num_pts = int(p_sel.split()[1])
+            export_df = df.tail(num_pts)
+
+        st.dataframe(export_df)
+        
+        csv = export_df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="Download data as CSV",
             data=csv,

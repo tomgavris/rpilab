@@ -100,8 +100,8 @@ try:
         if fill_pct >= 100:
             if last_fill_pct >= 100 and current_interval != 3600:
                 set_mode(3600)
-            elif last_fill_pct < 100 and current_interval != 60:
-                set_mode(60)
+            elif last_fill_pct < 100 and current_interval != 10:
+                set_mode(10)
         elif fill_pct >= 90 and current_interval != 60:
             set_mode(60)
 

@@ -6,7 +6,6 @@ import time
 from datetime import datetime, timedelta
 import warnings
 
-# Hide Pandas/Streamlit warnings
 warnings.filterwarnings('ignore')
 
 # --- CONFIGURATION ---
@@ -64,15 +63,24 @@ def update_interval(seconds):
 st.set_page_config(page_title="Bucket Monitor", layout="wide")
 st.title("Smart Bucket Monitor")
 
+# Initialize session state for the 10s cooldown buffer
+if 'last_mode_change' not in st.session_state:
+    st.session_state.last_mode_change = datetime.min
+
+# Fetch data first so we can check if the system is verifying an overflow
+df = fetch_data()
+fill_pct = df.iloc[-1]['fill_pct'] if not df.empty else 0.0
+current_db_interval = get_current_interval()
+
 # --- SIDEBAR CONTROLS ---
 st.sidebar.header("Device Settings")
+
 mode_options = {
     "Super Intense (Every 10 sec)": 10,
     "Intense (Every 1 min)": 60,
     "Power Saving (Every 1 hour)": 3600
 }
 
-current_db_interval = get_current_interval()
 labels = list(mode_options.keys())
 default_index = 1 
 for i, label in enumerate(labels):
@@ -81,23 +89,29 @@ for i, label in enumerate(labels):
 
 selected_label = st.sidebar.radio("Select Mode:", labels, index=default_index)
 
-if st.sidebar.button("Apply Settings"):
-    sleep_time = mode_options[selected_label]
-    if update_interval(sleep_time):
-        st.sidebar.success(f"Mode saved: {sleep_time} seconds!")
-        time.sleep(1.5)  
-        st.rerun()
-    else:
-        st.sidebar.error("Failed to update database.")
+# Locking Logic
+is_verifying_overflow = (fill_pct >= 100 and current_db_interval == 10)
+time_since_change = (datetime.now() - st.session_state.last_mode_change).total_seconds()
 
-# --- DATA PROCESSING ---
-df = fetch_data()
+if is_verifying_overflow:
+    st.sidebar.error("🔒 **AUTOMATIC MODE**\n\nVerifying overflow. Manual controls are temporarily locked.")
+elif time_since_change < 10:
+    st.sidebar.warning(f"⏳ **Cooldown Active**\n\nPlease wait {int(10 - time_since_change)}s before changing modes again.")
+else:
+    if st.sidebar.button("Apply Settings"):
+        sleep_time = mode_options[selected_label]
+        if update_interval(sleep_time):
+            st.session_state.last_mode_change = datetime.now()
+            st.sidebar.success(f"Mode saved: {sleep_time} seconds!")
+            time.sleep(1.5)  
+            st.rerun()
+        else:
+            st.sidebar.error("Failed to update database.")
 
+# --- MAIN DASHBOARD ---
 if not df.empty:
     latest = df.iloc[-1]
-    curr_dist = latest['distance']
     water_height = latest['water_height']
-    fill_pct = latest['fill_pct']
 
     tab1, tab2 = st.tabs(["Dashboard", "Raw Data Export"])
 
@@ -115,7 +129,6 @@ if not df.empty:
         col3.metric("Space Remaining", f"{(BUCKET_HEIGHT_CM - water_height):.1f} cm")
 
         st.divider()
-
         st.subheader("History Logs")
         time_filter = st.selectbox("Select Time Range:", ["Last 1 Hour", "Last 24 Hours", "All Time"])
 
@@ -153,10 +166,7 @@ if not df.empty:
 
     with tab2:
         st.subheader("Sensor Database Export")
-        
         export_df = df.copy()
-        
-        # Determine sorting option structure based on selection
         filter_mode = st.radio("Filter data by:", ["Time", "Number of Points"])
         
         if filter_mode == "Time":
@@ -173,7 +183,6 @@ if not df.empty:
             export_df = df.tail(num_pts)
 
         st.dataframe(export_df)
-        
         csv = export_df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="Download data as CSV",

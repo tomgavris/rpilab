@@ -1,13 +1,7 @@
-import streamlit as st
-import pymysql
-import pandas as pd
-import altair as alt
+import RPi.GPIO as GPIO
 import time
-from datetime import datetime, timedelta
-import warnings
-
-# Hide Pandas/Streamlit warnings from terminal
-warnings.filterwarnings('ignore')
+import pymysql
+from datetime import datetime
 
 # --- CONFIGURATION ---
 BUCKET_HEIGHT_CM = 10.0
@@ -20,25 +14,49 @@ DB_CONFIG = {
     'database': 'mybucket'
 }
 
+# --- GPIO SETUP ---
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+TRIG, ECHO = 23, 24
+GPIO.setup(TRIG, GPIO.OUT)
+GPIO.setup(ECHO, GPIO.IN)
+
 def get_connection():
     return pymysql.connect(**DB_CONFIG)
 
-def fetch_data():
-    conn = get_connection()
-    try:
-        df = pd.read_sql("SELECT timestamp, distance, velocity FROM WaterSensor ORDER BY timestamp ASC", conn)
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            df['water_height'] = (BUCKET_HEIGHT_CM + SENSOR_OFFSET_CM) - df['distance']
-            df['fill_pct'] = (df['water_height'] / BUCKET_HEIGHT_CM) * 100
-            
-            df['water_height'] = df['water_height'].clip(lower=0)
-            df['fill_pct'] = df['fill_pct'].clip(lower=0)
-        return df
-    finally:
-        conn.close()
+def get_distance():
+    GPIO.output(TRIG, False)
+    time.sleep(0.05)
+    
+    GPIO.output(TRIG, True)
+    time.sleep(0.00001)
+    GPIO.output(TRIG, False)
 
-def get_current_interval():
+    start_time, stop_time = time.time(), time.time()
+    timeout = start_time + 0.1
+
+    while GPIO.input(ECHO) == 0:
+        start_time = time.time()
+        if start_time > timeout: return 0.0
+
+    while GPIO.input(ECHO) == 1:
+        stop_time = time.time()
+        if stop_time > timeout: return 0.0
+
+    return ((stop_time - start_time) * 34300) / 2
+
+def set_mode(seconds):
+    try:
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE DeviceSettings SET interval_seconds = %s WHERE id = 1", (seconds,))
+        conn.commit()
+        conn.close()
+        print(f"Auto-Switch: Mode set to {seconds}s interval.")
+    except Exception as e:
+        pass
+
+def get_sleep_interval():
     try:
         conn = get_connection()
         with conn.cursor() as cursor:
@@ -50,125 +68,64 @@ def get_current_interval():
     finally:
         if 'conn' in locals() and conn.open: conn.close()
 
-def update_interval(seconds):
-    try:
-        conn = get_connection()
-        with conn.cursor() as cursor:
-            cursor.execute("UPDATE DeviceSettings SET interval_seconds = %s WHERE id = 1", (seconds,))
-        conn.commit()
-        conn.close()
-        return True
-    except:
-        return False
+# --- MAIN LOOP ---
+print(f"Starting Monitor. Bucket: {BUCKET_HEIGHT_CM}cm, Offset: {SENSOR_OFFSET_CM}cm")
 
-st.set_page_config(page_title="Bucket Monitor", layout="wide")
-st.title("Smart Bucket Monitor")
+last_fill_pct = 0.0
+last_water_height = None
+last_time = None
 
-# --- SIDEBAR CONTROLS ---
-st.sidebar.header("Device Settings")
-mode_options = {
-    "Super Intense (Every 10 sec)": 10,
-    "Intense (Every 1 min)": 60,
-    "Power Saving (Every 1 hour)": 3600
-}
+try:
+    while True:
+        dist = get_distance()
+        current_time = datetime.now()
 
-current_db_interval = get_current_interval()
-labels = list(mode_options.keys())
-default_index = 1 
-for i, label in enumerate(labels):
-    if mode_options[label] == current_db_interval:
-        default_index = i
+        total_depth = BUCKET_HEIGHT_CM + SENSOR_OFFSET_CM
+        water_height = total_depth - dist
+        fill_pct = (water_height / BUCKET_HEIGHT_CM) * 100
 
-selected_label = st.sidebar.radio("Select Mode:", labels, index=default_index)
-
-if st.sidebar.button("Apply Settings"):
-    sleep_time = mode_options[selected_label]
-    if update_interval(sleep_time):
-        st.sidebar.success(f"Mode saved: {sleep_time} seconds!")
-        time.sleep(1.5)  # Let the user see the green box before reloading
-        st.rerun()
-    else:
-        st.sidebar.error("Failed to update database.")
-
-# --- DATA PROCESSING ---
-df = fetch_data()
-
-if not df.empty:
-    latest = df.iloc[-1]
-    curr_dist = latest['distance']
-    water_height = latest['water_height']
-    fill_pct = latest['fill_pct']
-
-    tab1, tab2 = st.tabs(["Dashboard", "Raw Data Export"])
-
-    with tab1:
-        # WARNING LOGIC
-        if fill_pct >= 100:
-            st.error(f"CRITICAL WARNING: OVERFLOW DETECTED! (Level: {fill_pct:.1f}%)")
-        elif fill_pct >= 90:
-            st.warning(f"HIGH LEVEL WARNING: Capacity is at {fill_pct:.1f}%")
+        # Calculate Velocity
+        if last_time is not None:
+            time_diff = (current_time - last_time).total_seconds()
+            velocity = (water_height - last_water_height) / time_diff if time_diff > 0 else 0.0
         else:
-            st.success(f"Status Normal: {fill_pct:.1f}% Full")
-
-        # METRICS
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Water Level", f"{water_height:.1f} cm")
-        col2.metric("Fill Percentage", f"{fill_pct:.1f} %")
-        col3.metric("Space Remaining", f"{(BUCKET_HEIGHT_CM - water_height):.1f} cm")
-
-        st.divider()
-
-        # TIMEFRAME FILTER
-        st.subheader("History Logs")
-        time_filter = st.selectbox("Select Time Range:", ["Last 1 Hour", "Last 24 Hours", "All Time"])
-
-        now = datetime.now()
-        filtered_df = df.copy()
-        
-        # Calculate exactly where the left side of the graph should start
-        if time_filter == "Last 1 Hour":
-            domain_start = now - timedelta(hours=1)
-            filtered_df = df[df['timestamp'] >= domain_start]
-        elif time_filter == "Last 24 Hours":
-            domain_start = now - timedelta(hours=24)
-            filtered_df = df[df['timestamp'] >= domain_start]
-        else:
-            domain_start = df['timestamp'].min()
-
-        # CHARTS
-        if not filtered_df.empty:
-            st.write("**Fill Percentage History**")
-            fill_chart = alt.Chart(filtered_df).mark_line().encode(
-                x=alt.X('timestamp:T', scale=alt.Scale(domain=[domain_start, now]), title="Time"),
-                y=alt.Y('fill_pct:Q', title="Fill %")
-            )
-            st.altair_chart(fill_chart, use_container_width=True)
+            velocity = 0.0
             
-            st.write("**Water Velocity over Time**")
-            vel_chart = alt.Chart(filtered_df).mark_line(color="#FF4B4B").encode(
-                x=alt.X('timestamp:T', scale=alt.Scale(domain=[domain_start, now]), title="Time"),
-                y=alt.Y('velocity:Q', title="Velocity (cm/s)")
-            )
-            st.altair_chart(vel_chart, use_container_width=True)
-        else:
-            st.info("No data recorded in the selected timeframe.")
+        last_water_height = water_height
+        last_time = current_time
 
-        if st.button("Refresh Status"):
-            st.rerun()
+        current_interval = get_sleep_interval()
 
-    with tab2:
-        st.subheader("Sensor Database")
-        st.dataframe(df)
+        # Auto-Mode Logic
+        if fill_pct >= 100:
+            if last_fill_pct >= 100 and current_interval != 3600:
+                set_mode(3600)
+            elif last_fill_pct < 100 and current_interval != 60:
+                set_mode(60)
+        elif fill_pct >= 90 and current_interval != 60:
+            set_mode(60)
+
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                sql = "INSERT INTO WaterSensor (timestamp, distance, velocity) VALUES (%s, %s, %s)"
+                cursor.execute(sql, (current_time, dist, velocity))
+            conn.commit()
+        finally:
+            conn.close()
+
+        print(f"[{current_time.strftime('%H:%M:%S')}] Dist: {dist:.1f}cm | Height: {water_height:.1f}cm | Fill: {fill_pct:.1f}% | Vel: {velocity:.2f}cm/s | Mode: {current_interval}s")
+        last_fill_pct = fill_pct
+
+        # Smart Sleep: Wake up every 5 seconds to check if mode changed
+        target_sleep = get_sleep_interval()
+        checks = max(1, int(target_sleep / 5))
         
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Download data as CSV",
-            data=csv,
-            file_name='water_sensor_data.csv',
-            mime='text/csv',
-        )
+        for _ in range(checks):
+            time.sleep(5)
+            if get_sleep_interval() != target_sleep:
+                print("Interrupt: New mode detected in database!")
+                break
 
-else:
-    st.info("No data available yet.")
-    if st.button("Refresh Status"):
-        st.rerun()
+except KeyboardInterrupt:
+    GPIO.cleanup()

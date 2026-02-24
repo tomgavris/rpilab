@@ -100,16 +100,20 @@ try:
             overflow_count += 1
             if overflow_count == 1 and current_interval != 10:
                 set_mode(10)
+                current_interval = 10
             elif overflow_count >= 10 and current_interval != 3600:
                 set_mode(3600)
+                current_interval = 3600
         else:
             if overflow_count > 0:
                 overflow_count = 0
                 if current_interval == 10:
-                    set_mode(60) # Cancel verification, return to Intense
+                    set_mode(60) 
+                    current_interval = 60
             
             if fill_pct >= 90 and fill_pct < 100 and current_interval != 60:
                 set_mode(60)
+                current_interval = 60
 
         conn = get_connection()
         try:

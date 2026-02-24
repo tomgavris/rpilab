@@ -71,9 +71,9 @@ def get_sleep_interval():
 # --- MAIN LOOP ---
 print(f"Starting Monitor. Bucket: {BUCKET_HEIGHT_CM}cm, Offset: {SENSOR_OFFSET_CM}cm")
 
-last_fill_pct = 0.0
 last_water_height = None
 last_time = None
+overflow_count = 0  # Tracks consecutive full readings
 
 try:
     while True:
@@ -93,17 +93,23 @@ try:
             
         last_water_height = water_height
         last_time = current_time
-
         current_interval = get_sleep_interval()
 
-        # Auto-Mode Logic
+        # Auto-Mode Logic with 10-Count Verification
         if fill_pct >= 100:
-            if last_fill_pct >= 100 and current_interval != 3600:
-                set_mode(3600)
-            elif last_fill_pct < 100 and current_interval != 10:
+            overflow_count += 1
+            if overflow_count == 1 and current_interval != 10:
                 set_mode(10)
-        elif fill_pct >= 90 and current_interval != 60:
-            set_mode(60)
+            elif overflow_count >= 10 and current_interval != 3600:
+                set_mode(3600)
+        else:
+            if overflow_count > 0:
+                overflow_count = 0
+                if current_interval == 10:
+                    set_mode(60) # Cancel verification, return to Intense
+            
+            if fill_pct >= 90 and fill_pct < 100 and current_interval != 60:
+                set_mode(60)
 
         conn = get_connection()
         try:
@@ -114,10 +120,10 @@ try:
         finally:
             conn.close()
 
-        print(f"[{current_time.strftime('%H:%M:%S')}] Dist: {dist:.1f}cm | Height: {water_height:.1f}cm | Fill: {fill_pct:.1f}% | Vel: {velocity:.2f}cm/s | Mode: {current_interval}s")
-        last_fill_pct = fill_pct
+        status_flag = f"[Verifying {overflow_count}/10]" if 0 < overflow_count < 10 else ""
+        print(f"[{current_time.strftime('%H:%M:%S')}] Dist: {dist:.1f}cm | Fill: {fill_pct:.1f}% | Mode: {current_interval}s {status_flag}")
 
-        # Smart Sleep: Wake up every 5 seconds to check if mode changed
+        # Smart Sleep
         target_sleep = get_sleep_interval()
         checks = max(1, int(target_sleep / 5))
         

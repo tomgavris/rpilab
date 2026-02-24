@@ -1,14 +1,20 @@
 import streamlit as st
 import pymysql
 import pandas as pd
+import altair as alt
+import time
 from datetime import datetime, timedelta
+import warnings
 
-# --- USER CONFIGURATION ---
+# Hide Pandas/Streamlit warnings from terminal
+warnings.filterwarnings('ignore')
+
+# --- CONFIGURATION ---
 BUCKET_HEIGHT_CM = 10.0
 SENSOR_OFFSET_CM = 5.0
 
 DB_CONFIG = {
-    'host': 'localhost',
+    'host': '127.0.0.1',
     'user': 'user1234',
     'password': 'yesuser',
     'database': 'mybucket'
@@ -23,11 +29,9 @@ def fetch_data():
         df = pd.read_sql("SELECT timestamp, distance, velocity FROM WaterSensor ORDER BY timestamp ASC", conn)
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
-            # Pre-calculate data for the whole dataframe
             df['water_height'] = (BUCKET_HEIGHT_CM + SENSOR_OFFSET_CM) - df['distance']
             df['fill_pct'] = (df['water_height'] / BUCKET_HEIGHT_CM) * 100
             
-            # Clean up negatives for display
             df['water_height'] = df['water_height'].clip(lower=0)
             df['fill_pct'] = df['fill_pct'].clip(lower=0)
         return df
@@ -81,6 +85,7 @@ if st.sidebar.button("Apply Settings"):
     sleep_time = mode_options[selected_label]
     if update_interval(sleep_time):
         st.sidebar.success(f"Mode saved: {sleep_time} seconds!")
+        time.sleep(1.5)  # Let the user see the green box before reloading
         st.rerun()
     else:
         st.sidebar.error("Failed to update database.")
@@ -94,7 +99,6 @@ if not df.empty:
     water_height = latest['water_height']
     fill_pct = latest['fill_pct']
 
-    # --- TABS SETUP ---
     tab1, tab2 = st.tabs(["Dashboard", "Raw Data Export"])
 
     with tab1:
@@ -115,21 +119,37 @@ if not df.empty:
         st.divider()
 
         # TIMEFRAME FILTER
-        st.subheader("Fill Percentage History")
+        st.subheader("History Logs")
         time_filter = st.selectbox("Select Time Range:", ["Last 1 Hour", "Last 24 Hours", "All Time"])
 
+        now = datetime.now()
         filtered_df = df.copy()
+        
+        # Calculate exactly where the left side of the graph should start
         if time_filter == "Last 1 Hour":
-            filtered_df = df[df['timestamp'] >= (datetime.now() - timedelta(hours=1))]
+            domain_start = now - timedelta(hours=1)
+            filtered_df = df[df['timestamp'] >= domain_start]
         elif time_filter == "Last 24 Hours":
-            filtered_df = df[df['timestamp'] >= (datetime.now() - timedelta(hours=24))]
+            domain_start = now - timedelta(hours=24)
+            filtered_df = df[df['timestamp'] >= domain_start]
+        else:
+            domain_start = df['timestamp'].min()
 
         # CHARTS
         if not filtered_df.empty:
-            st.line_chart(filtered_df, x='timestamp', y='fill_pct')
+            st.write("**Fill Percentage History**")
+            fill_chart = alt.Chart(filtered_df).mark_line().encode(
+                x=alt.X('timestamp:T', scale=alt.Scale(domain=[domain_start, now]), title="Time"),
+                y=alt.Y('fill_pct:Q', title="Fill %")
+            )
+            st.altair_chart(fill_chart, use_container_width=True)
             
-            st.subheader("Water Velocity over Time")
-            st.line_chart(filtered_df, x='timestamp', y='velocity', color="#FF4B4B")
+            st.write("**Water Velocity over Time**")
+            vel_chart = alt.Chart(filtered_df).mark_line(color="#FF4B4B").encode(
+                x=alt.X('timestamp:T', scale=alt.Scale(domain=[domain_start, now]), title="Time"),
+                y=alt.Y('velocity:Q', title="Velocity (cm/s)")
+            )
+            st.altair_chart(vel_chart, use_container_width=True)
         else:
             st.info("No data recorded in the selected timeframe.")
 
@@ -138,7 +158,7 @@ if not df.empty:
 
     with tab2:
         st.subheader("Sensor Database")
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df)
         
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
